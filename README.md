@@ -26,6 +26,7 @@ The controller is only safe to run in a shared production cluster if it holds al
 2. **It cannot amplify an incident.** It activates during failure, so its own resource use and load on the cluster must stay bounded under a cascading failure and never add pressure to an already-stressed cluster.
 3. **It cannot leak.** Least-privilege access only; captured data fails safe by default, so sensitive content is never persisted.
 4. **It proves it works.** Its own health — and, critically, whether it is actually capturing — must be observable and alertable. End-to-end capture is continuously verified, not assumed.
+5. **It stays available when it matters.** It must survive node disruption and reclamation so that it is running at the moment a failure occurs, and run hardened with least privilege at the workload level.
 
 ---
 
@@ -34,4 +35,4 @@ The controller is only safe to run in a shared production cluster if it holds al
 1. [Kubernetes Event API — default TTL ~1 hour](https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/event-v1/)
 2. [Announcing Flux v2.7 GA](https://fluxcd.io/blog/2025/09/flux-v2.7.0/)
 3. [RFC-0011: OpenTelemetry Tracing](https://github.com/fluxcd/flux2/tree/main/rfcs/0011-opentelemetry-tracing)
-6. **It stays available when it matters.** It must survive node disruption and reclamation so that it is running at the moment a failure occurs, and run hardened with least privilege at the workload level.
+
