@@ -8,14 +8,6 @@ Flux keeps retrying. States get overwritten. Kubernetes events expire after arou
 
 Recent Flux releases introduced some improvements here — v2.7 added reconciliation history and OpenTelemetry tracing<sup>[2]</sup>, and the OTel tracing RFC<sup>[3]</sup> formalised how spans are collected and forwarded. These tell you *that* something failed and *when*. What they don't tell you is why the conditions existed across the dependency chain that caused it to fail in the first place. This is an explicit non-goal of the RFC<sup>[3]</sup>.
 
----
-
-### References
-
-1. [Kubernetes Event API — default TTL ~1 hour](https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/event-v1/)
-2. [Announcing Flux v2.7 GA](https://fluxcd.io/blog/2025/09/flux-v2.7.0/)
-3. [RFC-0011: OpenTelemetry Tracing](https://github.com/fluxcd/flux2/tree/main/rfcs/0011-opentelemetry-tracing)
-
 
 ## Approach
 
@@ -35,4 +27,12 @@ The controller is only safe to run in a shared production cluster if it holds al
 2. **It cannot amplify an incident.** It activates during failure, so its own resource use and load on the cluster must stay bounded under a cascading failure and never add pressure to an already-stressed cluster.
 3. **It cannot leak.** Least-privilege access only; captured data fails safe by default, so sensitive content is never persisted.
 4. **It proves it works.** Its own health — and, critically, whether it is actually capturing — must be observable and alertable. End-to-end capture is continuously verified, not assumed.
-5. **It stays available when it matters.** It must survive node disruption and reclamation so that it is running at the moment a failure occurs, and run hardened with least privilege at the workload level.
+
+---
+
+### References
+
+1. [Kubernetes Event API — default TTL ~1 hour](https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/event-v1/)
+2. [Announcing Flux v2.7 GA](https://fluxcd.io/blog/2025/09/flux-v2.7.0/)
+3. [RFC-0011: OpenTelemetry Tracing](https://github.com/fluxcd/flux2/tree/main/rfcs/0011-opentelemetry-tracing)
+6. **It stays available when it matters.** It must survive node disruption and reclamation so that it is running at the moment a failure occurs, and run hardened with least privilege at the workload level.
