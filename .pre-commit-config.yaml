@@ -1,0 +1,94 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: no-commit-to-branch
+        args: [--branch, main]
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args: [--severity=warning]
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: [--config-file, .yamllint.yml]
+
+  - repo: https://github.com/bridgecrewio/checkov
+    rev: 3.2.0
+    hooks:
+      - id: checkov
+        args: [--directory, config, --compact, --quiet]
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.4
+    hooks:
+      - id: actionlint
+
+  - repo: local
+    hooks:
+      - id: hadolint
+        name: hadolint
+        entry: hadolint Dockerfile
+        language: system
+        files: Dockerfile
+        pass_filenames: false
+
+      - id: go-fmt
+        name: go fmt
+        entry: go fmt ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: golangci-lint run ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: govulncheck
+        name: govulncheck
+        entry: govulncheck ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: trivy
+        name: trivy
+        entry: trivy fs --exit-code 1 --severity HIGH,CRITICAL --scanners vuln,secret,misconfig --quiet .
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: go-test
+        name: go test
+        entry: go test ./... -count=1
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: e2e-test
+        name: e2e tests
+        entry: bash test/e2e/run_all.sh
+        language: system
+        pass_filenames: false
+        always_run: true

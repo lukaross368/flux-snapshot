@@ -1,0 +1,33 @@
+# binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# test
+*.test
+*.out
+
+# go
+/vendor/
+
+# build artifacts
+dist/
+
+# editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# os
+.DS_Store
+Thumbs.db
+
+# secrets / local config
+*.env
+*.local
+kubeconfig
