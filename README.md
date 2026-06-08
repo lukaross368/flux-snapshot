@@ -35,4 +35,3 @@ The controller is only safe to run in a shared production cluster if it holds al
 1. [Kubernetes Event API — default TTL ~1 hour](https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/event-v1/)
 2. [Announcing Flux v2.7 GA](https://fluxcd.io/blog/2025/09/flux-v2.7.0/)
 3. [RFC-0011: OpenTelemetry Tracing](https://github.com/fluxcd/flux2/tree/main/rfcs/0011-opentelemetry-tracing)
-
