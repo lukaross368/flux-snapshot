@@ -70,30 +70,47 @@ setup_cluster() {
 
 delete_objects() {
   for name in "$@"; do
-    kubectl delete gitrepository  "$name" -n "$NS" --ignore-not-found 2>/dev/null || true
-    kubectl delete kustomization  "$name" -n "$NS" --ignore-not-found 2>/dev/null || true
+    for kind in gitrepository kustomization helmrelease helmrepository; do
+      kubectl delete "$kind" "$name" -n "$NS" --ignore-not-found 2>/dev/null || true
+    done
   done
 }
 
-wait_for_failure() {
-  local name=$1
+# _ready_status <kind/name | name>   (bare names default to kustomization)
+_ready_status() {
+  local ref=$1 kind name
+  if [[ "$ref" == */* ]]; then kind=${ref%%/*}; name=${ref#*/}; else kind=kustomization; name=$ref; fi
+  kubectl get "$kind" "$name" -n "$NS" \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo ""
+}
+
+# wait_for_condition <kind/name | name> <True|False>
+wait_for_condition() {
+  local ref=$1 want=$2
   local deadline=$(( SECONDS + 120 ))
   while [[ $SECONDS -lt $deadline ]]; do
-    local status
-    status=$(kubectl get kustomization "$name" -n "$NS" \
-      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-    [[ "$status" == "False" ]] && return 0
+    [[ "$(_ready_status "$ref")" == "$want" ]] && return 0
     sleep 3
   done
-  echo "TIMEOUT: $name did not reach Ready=False within 120s" >&2
+  echo "TIMEOUT: $ref did not reach Ready=$want within 120s" >&2
   return 1
 }
 
+wait_for_failure() { wait_for_condition "$1" "False"; }
+
 wait_for_failures() {
   info "waiting for failures: $*"
-  for name in "$@"; do
-    wait_for_failure "$name"
-    info "$name  Ready=False"
+  for ref in "$@"; do
+    wait_for_failure "$ref"
+    info "$ref  Ready=False"
+  done
+}
+
+wait_for_ready() {
+  info "waiting for healthy fixtures: $*"
+  for ref in "$@"; do
+    wait_for_condition "$ref" "True"
+    info "$ref  Ready=True"
   done
 }
 

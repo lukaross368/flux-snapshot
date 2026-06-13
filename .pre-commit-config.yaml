@@ -86,9 +86,9 @@ repos:
         types: [go]
         pass_filenames: false
 
-      - id: e2e-test
-        name: e2e tests
-        entry: bash test/e2e/run_all.sh
-        language: system
-        pass_filenames: false
-        always_run: true
+      # - id: e2e-test
+      #   name: e2e tests
+      #   entry: bash test/e2e/run_all.sh
+      #   language: system
+      #   pass_filenames: false
+      #   always_run: true

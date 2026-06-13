@@ -1,6 +1,6 @@
 # Test Cases
 
-Iteration 2 cases (1–3) cover pure Kustomization chains. Iteration 3 cases (4–6) introduce HelmRepositories and HelmReleases. All scripts are in `test/`.
+Iteration 2 cases (1–3) cover pure Kustomization chains. Iteration 3 cases (4–6) introduce HelmRepositories and HelmReleases. All scripts are in `test/e2e/`.
 
 ---
 
@@ -230,61 +230,62 @@ Two notification groups, one per root cause. Frontend and backend notifications 
 
 ## Iteration 3
 
-These cases define the acceptance criteria for iteration 3. In all three, HelmReleases and Kustomizations appear in the **same dependency chain** — the way they are actually deployed in production, where platform bootstrap Kustomizations gate application HelmReleases, databases deployed via Helm gate application config Kustomizations, and so on.
+These cases define the acceptance criteria for iteration 3. In all three, HelmReleases and Kustomizations appear in the **same failure chain** — the way they are actually coupled in production.
+
+> **Design correction (2026-06-12).** An earlier draft of these cases assumed cross-kind `dependsOn` (a HelmRelease depending on a Kustomization and vice versa). Flux does not support this on any version: the `dependsOn` reference has no `kind` field — HelmReleases can only depend on HelmReleases, Kustomizations on Kustomizations. Real clusters express cross-type coupling through two other mechanisms, which these cases now use:
+>
+> 1. **Chart from Git** — a HelmRelease's chart can be sourced from a GitRepository (`spec.chart.spec.sourceRef.kind: GitRepository`), so a broken Git source blocks Helm deployments directly.
+> 2. **healthChecks** — a Kustomization can gate its readiness on arbitrary objects via `spec.healthChecks`, including HelmReleases. This is the standard pattern for making a config layer wait on a Helm-deployed service; on failure the Kustomization reports `HealthCheckFailed`.
+
+> **Fixture quirk discovered on kind (2026-06-12).** A Kustomization whose health check target never becomes ready will, with default settings, *never stably report* `Ready=False`: with `interval: 30s` and a health check that itself takes `timeout: 30s` to fail, the next scheduled reconcile is already due the moment the current one fails, so `Ready=False/HealthCheckFailed` is overwritten with `Ready=Unknown/Progressing` within milliseconds (verified against kustomize-controller from Flux v2.4.0; the failure is visible only as Warning events). Fixtures that gate on healthChecks therefore set an explicit `retryInterval: 2m`, which gives the controller an idle window in which the failed state persists and is observable — by these tests and by any watcher, including flux-snapshot itself.
 
 Key new traversal requirements:
-- HelmRelease chart source is at `spec.chart.spec.sourceRef`, one level deeper than Kustomization's `spec.sourceRef`
-- HelmRelease `spec.dependsOn` can reference Kustomizations as well as other HelmReleases
-- Kustomization `spec.dependsOn` can reference HelmReleases as well as other Kustomizations
-- HelmRelease conditions use different reason strings: `HelmChartNotFound`, `InstallFailed`, `DependencyNotReady`
+- HelmRelease chart source is at `spec.chart.spec.sourceRef` (one level deeper than Kustomization's `spec.sourceRef`); its kind can be `HelmRepository` **or** `GitRepository`
+- HelmRelease `spec.dependsOn` references other HelmReleases and becomes a `dependsOn` edge
+- Kustomization `spec.healthChecks` entries that reference Flux kinds (HelmRelease) become `healthCheck` edges; entries for non-Flux kinds (Deployment, etc.) are ignored
+- HelmReleases are now **triggers**: the controller watches them and builds a snapshot when one goes `Ready=False`
+- New condition reasons appear: `HealthCheckFailed` (Kustomization), `DependencyNotReady` and chart-not-ready reasons (HelmRelease), `FetchFailed` (HelmRepository)
+- The `chain` in the notification is the **path from trigger to root cause**, not an unordered node list — fan-in branches and healthy side nodes are in the snapshot but not in the chain string
 
 ---
 
-## Test Case 4: GitRepository Failure Cascades Through Two Kustomizations into a HelmRelease
+## Test Case 4: Chart-from-Git HelmRelease Blocked by a Broken Git Source
 
 ### Scenario
 
-A platform team manages cluster bootstrap in two layers: `tc4-cluster-base` installs namespaces and RBAC, then `tc4-prometheus-crds` installs the Prometheus Operator CRDs (depends on `tc4-cluster-base` being ready). A HelmRelease `tc4-prometheus` deploys the kube-prometheus-stack chart from Bitnami and can only install once the CRDs exist, so it declares `dependsOn: tc4-prometheus-crds`. Both Kustomizations source from the same platform GitRepository. When that GitRepository loses authentication, `tc4-cluster-base` fails immediately, which blocks `tc4-prometheus-crds`, which blocks `tc4-prometheus`.
+A platform team deploys a monitoring chart **vendored in their platform GitRepository** (`spec.chart.spec.sourceRef.kind: GitRepository`) — the standard chart-from-git pattern for in-house charts. The GitRepository loses authentication and the HelmRelease `tc4-prometheus` can no longer build its chart.
 
-This is the standard cluster bootstrap pattern: ordered Kustomization layers gate Helm application deployments.
+This is deliberately the minimal forcing case for HelmRelease support: there is **no Kustomization anywhere in the fixture**, so a notification can only be produced if the controller watches HelmReleases as triggers and follows the chart source edge. (An earlier draft paired the HR with a Kustomization sharing the same source — that version passed against the iteration 2 controller because the KS trigger alone produced the expected output, masking the missing HR support. Cross-kind dedup is instead validated deterministically by TC6.)
 
 ### Object Graph
 
 ```mermaid
 graph LR
-    GR["GitRepository\ntc4-platform-git\n❌ GitOperationFailed"]
-    HREPO["HelmRepository\ntc4-bitnami"]
-    BASE["Kustomization\ntc4-cluster-base\n❌ ArtifactFailed"]
-    OPS["Kustomization\ntc4-prometheus-crds\n❌ DependencyNotReady"]
-    APP["HelmRelease\ntc4-prometheus\n❌ DependencyNotReady"]
+    GR["GitRepository\ntc4-platform-git\n❌ GitOperationFailed\n(authentication required)"]
+    APP["HelmRelease\ntc4-prometheus\n❌ chart not ready"]
 
-    BASE -->|sourceRef| GR
-    OPS -->|sourceRef| GR
-    OPS -->|dependsOn| BASE
-    APP -->|dependsOn| OPS
-    APP -->|chartRef| HREPO
+    APP -->|chartRef| GR
 ```
 
 ### Failure State
 
 ```
-NAME                   READY   REASON               MESSAGE
-tc4-cluster-base       False   ArtifactFailed       Source artifact not found, retrying in 30s
-tc4-prometheus-crds    False   DependencyNotReady   dependency 'flux-system/tc4-cluster-base' is not ready
-tc4-prometheus         False   DependencyNotReady   dependency 'flux-system/tc4-prometheus-crds' is not ready
+NAME             READY   REASON           MESSAGE
+tc4-prometheus   False   ArtifactFailed   HelmChart 'flux-system/flux-system-tc4-prometheus' is not ready
 ```
 
 ```
-NAME                READY   REASON               MESSAGE
-tc4-platform-git    False   GitOperationFailed   authentication required
+NAME               READY   REASON               MESSAGE
+tc4-platform-git   False   GitOperationFailed   authentication required
 ```
 
 ### Expected Controller Output
 
-One notification group. Three objects reconcile as failed; all share the same root cause key so only one notification fires.
+One notification group, triggered by the HelmRelease.
 
 ```json
 { "msg": "root cause", "details": {
+    "trigger":  "tc4-prometheus",
     "object":   "tc4-platform-git",
     "kind":     "GitRepository",
     "reason":   "GitOperationFailed",
@@ -292,18 +293,16 @@ One notification group. Three objects reconcile as failed; all share the same ro
 }}
 
 { "msg": "affected chain",
-  "chain": "tc4-prometheus(HelmRelease) → tc4-prometheus-crds(Kustomization) → tc4-cluster-base(Kustomization) → tc4-platform-git(GitRepository)" }
+  "chain": "tc4-prometheus(HelmRelease) → tc4-platform-git(GitRepository)" }
 
 { "msg": "warning event", "object": "tc4-platform-git", "reason": "GitOperationFailed" }
 ```
 
 ### What This Validates
 
-- HelmRelease `spec.dependsOn` pointing at a Kustomization is traversed (cross-type edge)
-- Traversal continues recursively through the Kustomization chain: `tc4-prometheus-crds` → `tc4-cluster-base` → `tc4-platform-git`
-- Both Kustomizations reference the same broken GitRepository but `tc4-platform-git` appears as a single node (visited map dedup)
-- Root cause is the GitRepository at the base, not the intermediate Kustomization or HelmRelease
-- 3 failing objects → 1 notification
+- HelmRelease is watched and acts as a snapshot trigger (impossible to pass with a Kustomization-only controller)
+- `spec.chart.spec.sourceRef` with kind `GitRepository` is traversed as a source edge
+- Root cause is the GitRepository, not the HelmRelease reporting the chart failure
 
 ---
 
@@ -311,39 +310,43 @@ One notification group. Three objects reconcile as failed; all share the same ro
 
 ### Scenario
 
-An app team runs their full stack via Helm from a self-hosted chart repository. `tc5-postgresql` deploys the database. `tc5-api-server` deploys the application API layer and declares `dependsOn: tc5-postgresql` so it only starts once the data layer is running. A Kustomization `tc5-app-config` deploys application configuration (ConfigMaps, Secrets, RBAC) and declares `dependsOn: tc5-api-server`, sourcing its manifests from a separate healthy GitRepository. The self-hosted chart repository goes down. `tc5-postgresql` immediately fails to fetch its chart. `tc5-api-server` is blocked. `tc5-app-config` is blocked.
+An app team runs their full stack via Helm from a self-hosted chart repository. `tc5-postgresql` deploys the database. `tc5-api-server` deploys the application API layer and declares `dependsOn: tc5-postgresql` so it only starts once the data layer is running. A Kustomization `tc5-app-config` deploys application configuration from a separate healthy GitRepository, and gates on the API being live with `healthChecks: [HelmRelease tc5-api-server]`. The self-hosted chart repository goes down. `tc5-postgresql` immediately fails to fetch its chart, `tc5-api-server` is blocked on its dependency, and `tc5-app-config` fails its health check.
 
-This is the reverse direction from TC4: the root cause is a HelmRepository and the failure propagates up through a HelmRelease chain into a Kustomization.
+The root cause is a HelmRepository and the failure propagates up through a HelmRelease chain into a Kustomization — the reverse direction from TC4.
 
 ### Object Graph
 
 ```mermaid
 graph LR
-    CHARTS["HelmRepository\ntc5-company-charts\n❌ IndexationFailed"]
+    CHARTS["HelmRepository\ntc5-company-charts\n❌ FetchFailed"]
     GR["GitRepository\ntc5-app-git"]
-    INFRA["HelmRelease\ntc5-postgresql\n❌ HelmChartNotFound"]
+    INFRA["HelmRelease\ntc5-postgresql\n❌ chart not ready"]
     APP["HelmRelease\ntc5-api-server\n❌ DependencyNotReady"]
-    CFG["Kustomization\ntc5-app-config\n❌ DependencyNotReady"]
+    CFG["Kustomization\ntc5-app-config\n❌ HealthCheckFailed"]
 
     INFRA -->|chartRef| CHARTS
     APP -->|dependsOn| INFRA
     APP -->|chartRef| CHARTS
-    CFG -->|dependsOn| APP
+    CFG -->|healthCheck| APP
     CFG -->|sourceRef| GR
 ```
 
 ### Failure State
 
 ```
-NAME               READY   REASON               MESSAGE
-tc5-postgresql     False   HelmChartNotFound    HelmChart 'flux-system/tc5-postgresql' is not ready
-tc5-api-server     False   DependencyNotReady   dependency 'flux-system/tc5-postgresql' is not ready
-tc5-app-config     False   DependencyNotReady   dependency 'flux-system/tc5-api-server' is not ready
+NAME             READY   REASON               MESSAGE
+tc5-app-config   False   HealthCheckFailed    timeout waiting for: [HelmRelease/flux-system/tc5-api-server status: 'Failed']
 ```
 
 ```
-NAME                  READY   REASON             MESSAGE
-tc5-company-charts    False   IndexationFailed   failed to fetch index: no such host
+NAME             READY   REASON               MESSAGE
+tc5-postgresql   False   ArtifactFailed       HelmChart 'flux-system/flux-system-tc5-postgresql' is not ready
+tc5-api-server   False   DependencyNotReady   dependency 'flux-system/tc5-postgresql' is not ready
+```
+
+```
+NAME                 READY   REASON        MESSAGE
+tc5-company-charts   False   FetchFailed   failed to fetch Helm repository index: no such host
 ```
 
 ### Expected Controller Output
@@ -354,22 +357,25 @@ One notification group. Both HelmReleases and the Kustomization reconcile as fai
 { "msg": "root cause", "details": {
     "object":   "tc5-company-charts",
     "kind":     "HelmRepository",
-    "reason":   "IndexationFailed",
-    "message":  "failed to fetch index: no such host"
+    "reason":   "FetchFailed",
+    "message":  "failed to fetch Helm repository index: no such host"
 }}
 
 { "msg": "affected chain",
   "chain": "tc5-app-config(Kustomization) → tc5-api-server(HelmRelease) → tc5-postgresql(HelmRelease) → tc5-company-charts(HelmRepository)" }
 
-{ "msg": "warning event", "object": "tc5-company-charts", "reason": "IndexationFailed" }
+{ "msg": "warning event", "object": "tc5-company-charts", "reason": "FetchFailed" }
 ```
+
+(Chain shown for the `tc5-app-config` trigger; if a HelmRelease fires first, its sub-chain to `tc5-company-charts` is equally valid.)
 
 ### What This Validates
 
-- Kustomization `spec.dependsOn` pointing at a HelmRelease is traversed (cross-type edge, reverse direction from TC4)
+- Kustomization `spec.healthChecks` referencing a HelmRelease is traversed (cross-type `healthCheck` edge)
 - Traversal continues recursively through the HelmRelease chain: `tc5-api-server` → `tc5-postgresql` → `tc5-company-charts`
-- Both HelmReleases reference `tc5-company-charts` via chartRef but the node appears once (visited map dedup)
-- Root cause is the HelmRepository at the base, not the HelmReleases reporting `DependencyNotReady` or `HelmChartNotFound`
+- Both HelmReleases reference `tc5-company-charts` via chart sourceRef but the node appears once (visited map dedup)
+- Root cause is the HelmRepository at the base, not the objects reporting `DependencyNotReady` or `HealthCheckFailed`
+- The healthy `tc5-app-git` GitRepository is captured in the snapshot but is never selected as root cause
 - 3 failing objects → 1 notification
 
 ---
@@ -378,9 +384,9 @@ One notification group. Both HelmReleases and the Kustomization reconcile as fai
 
 ### Scenario
 
-A production cluster bootstraps TLS infrastructure before deploying application services. A Kustomization `tc6-cert-manager-crds` installs cert-manager CRDs from the platform GitRepository. A HelmRelease `tc6-cert-manager` installs cert-manager from the Jetstack chart repository (depends on the CRDs being present). A HelmRelease `tc6-api-gateway` deploys the API gateway and requires TLS, so it declares `dependsOn: tc6-cert-manager`. A Kustomization `tc6-ingress-config` deploys ingress rules and certificate resources (depends on the API gateway being healthy, sources from a separate healthy app GitRepository).
+A production cluster bootstraps TLS infrastructure before deploying application services, all from one platform GitRepository. A Kustomization `tc6-cert-manager-crds` installs cert-manager CRDs from it. A HelmRelease `tc6-cert-manager` installs cert-manager from a chart **vendored in the same platform repository** (chart-from-git). A HelmRelease `tc6-api-gateway` deploys the API gateway from the healthy Jetstack chart repository and requires TLS, so it declares `dependsOn: tc6-cert-manager`. A Kustomization `tc6-ingress-config` deploys ingress rules from a separate healthy app GitRepository and gates on the gateway with `healthChecks: [HelmRelease tc6-api-gateway]`.
 
-The platform GitRepository loses authentication. `tc6-cert-manager-crds` fails immediately. Everything above it in the chain is blocked. Four objects fail from a single root cause, propagating through alternating Kustomization and HelmRelease types.
+The platform GitRepository loses authentication. The CRDs Kustomization and the cert-manager HelmRelease fail immediately; everything above them is blocked. Four objects fail from a single root cause, propagating through alternating Kustomization and HelmRelease types.
 
 ### Object Graph
 
@@ -390,16 +396,15 @@ graph LR
     APPGIT["GitRepository\ntc6-apps-git"]
     CHARTS["HelmRepository\ntc6-jetstack"]
     CRDS["Kustomization\ntc6-cert-manager-crds\n❌ ArtifactFailed"]
-    CERT["HelmRelease\ntc6-cert-manager\n❌ DependencyNotReady"]
+    CERT["HelmRelease\ntc6-cert-manager\n❌ chart not ready"]
     GW["HelmRelease\ntc6-api-gateway\n❌ DependencyNotReady"]
-    CFG["Kustomization\ntc6-ingress-config\n❌ DependencyNotReady"]
+    CFG["Kustomization\ntc6-ingress-config\n❌ HealthCheckFailed"]
 
     CRDS -->|sourceRef| GIT
-    CERT -->|dependsOn| CRDS
-    CERT -->|chartRef| CHARTS
+    CERT -->|chartRef| GIT
     GW -->|dependsOn| CERT
     GW -->|chartRef| CHARTS
-    CFG -->|dependsOn| GW
+    CFG -->|healthCheck| GW
     CFG -->|sourceRef| APPGIT
 ```
 
@@ -408,14 +413,18 @@ graph LR
 ```
 NAME                    READY   REASON               MESSAGE
 tc6-cert-manager-crds   False   ArtifactFailed       Source artifact not found, retrying in 30s
-tc6-cert-manager        False   DependencyNotReady   dependency 'flux-system/tc6-cert-manager-crds' is not ready
-tc6-api-gateway         False   DependencyNotReady   dependency 'flux-system/tc6-cert-manager' is not ready
-tc6-ingress-config      False   DependencyNotReady   dependency 'flux-system/tc6-api-gateway' is not ready
+tc6-ingress-config      False   HealthCheckFailed    timeout waiting for: [HelmRelease/flux-system/tc6-api-gateway status: 'Failed']
 ```
 
 ```
-NAME                READY   REASON               MESSAGE
-tc6-platform-git    False   GitOperationFailed   authentication required
+NAME               READY   REASON               MESSAGE
+tc6-cert-manager   False   ArtifactFailed       HelmChart 'flux-system/flux-system-tc6-cert-manager' is not ready
+tc6-api-gateway    False   DependencyNotReady   dependency 'flux-system/tc6-cert-manager' is not ready
+```
+
+```
+NAME               READY   REASON               MESSAGE
+tc6-platform-git   False   GitOperationFailed   authentication required
 ```
 
 ### Expected Controller Output
@@ -431,14 +440,17 @@ One notification group. The trigger is whichever failing object reconciles first
 }}
 
 { "msg": "affected chain",
-  "chain": "tc6-ingress-config(Kustomization) → tc6-api-gateway(HelmRelease) → tc6-cert-manager(HelmRelease) → tc6-cert-manager-crds(Kustomization) → tc6-platform-git(GitRepository)" }
+  "chain": "tc6-ingress-config(Kustomization) → tc6-api-gateway(HelmRelease) → tc6-cert-manager(HelmRelease) → tc6-platform-git(GitRepository)" }
 
 { "msg": "warning event", "object": "tc6-platform-git", "reason": "GitOperationFailed" }
 ```
 
+(Chain shown for the `tc6-ingress-config` trigger. Note `tc6-cert-manager-crds` is a parallel branch into the same root cause: it appears in the snapshot graph, but not in this trigger's path string.)
+
 ### What This Validates
 
-- 4-hop traversal across all four object types in one chain: Kustomization → HelmRelease → HelmRelease → Kustomization → GitRepository
+- 4-hop traversal across mixed object types in one chain: Kustomization → HelmRelease → HelmRelease → GitRepository, using both cross-type mechanisms (healthCheck edge and chart-from-git edge)
 - Two healthy leaf nodes (`tc6-jetstack`, `tc6-apps-git`) are included in the snapshot but are NOT the root cause — `RootCause()` must select the leaf with `Ready=False`, not any leaf
+- Fan-in: `tc6-cert-manager-crds` and `tc6-cert-manager` both resolve to `tc6-platform-git`, which appears once in the graph (visited map dedup)
 - 4 failing objects from a single root cause → 1 notification
 - Healthy side nodes do not pollute the chain or confuse root cause detection

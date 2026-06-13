@@ -18,9 +18,54 @@ For each object in the failed chain — the failed object, its dependencies, the
 Each snapshot is one self-contained structured document (JSON), keyed by failed object and capture time. The natural home is object storage: one record per incident, durable and outside the cluster's transient state and ~1h event TTL. A lightweight index — or a thin custom resource pointing at each record — makes incidents queryable by object, time, or likely root cause; records could equally be shipped to an existing log store to sit alongside other telemetry.
 
 
+## What it looks like
+
+A GitRepository loses authentication and cascades into three Kustomizations. This is what the operator sees (real capture from the test cluster):
+
+```
+$ kubectl get kustomizations -n flux-system
+NAME    AGE   READY   STATUS
+app-a   78s   False   Source artifact not found, retrying in 30s
+app-b   78s   False   Source artifact not found, retrying in 30s
+infra   78s   False   Source artifact not found, retrying in 30s
+```
+
+Three identical symptoms, none of which mention the cause — that lives on a different resource type, reachable only by manually walking conditions → `dependsOn` → `sourceRef` → events before the trail expires ([test/e2e/control.sh](test/e2e/control.sh) scripts that six-step hunt for comparison).
+
+The moment `app-a` fails, flux-snapshot emits (abridged real output):
+
+```json
+{ "msg": "root cause", "details": {
+    "trigger":  "app-a",
+    "object":   "broken-source",
+    "kind":     "GitRepository",
+    "reason":   "GitOperationFailed",
+    "message":  "failed to checkout and determine revision: unable to clone 'https://github.com/flux-snapshot-test/platform-config': authentication required",
+    "duration": "24s" }}
+
+{ "msg": "affected chain",
+  "chain": "app-a(Kustomization) → infra(Kustomization) → broken-source(GitRepository)" }
+
+{ "msg": "warning event", "object": "broken-source", "reason": "GitOperationFailed", "count": 5 }
+```
+
+`app-b` and `infra` fail with the same root cause and are deduplicated — one incident, one notification, with the cascade path and the originating error attached.
+
+
+## Status
+
+Development is iterative and acceptance-test-first: each iteration is specified as end-to-end test cases ([docs/test-cases.md](docs/test-cases.md)) that run against a real Flux installation on kind and fail until the iteration is implemented.
+
+- ✅ **Iteration 1** — failing-Kustomization detector running on kind
+- ✅ **Iteration 2** — dependency-chain traversal, root-cause identification, per-root-cause dedup (e2e cases 1–3 green)
+- 🚧 **Iteration 3** — HelmRelease/HelmRepository support and cross-type chains via chart-from-git and `healthChecks` (e2e cases 4–6 written and red; [tickets](docs/iteration-3-tickets.md))
+- ⬜ **Production guarantees** — implement and verify the five properties below
+- ⬜ **CI/CD** — lint plus the kind e2e suite in GitHub Actions
+
+
 ## Guarantees
 
-The controller is only safe to run in a shared production cluster if it holds all of the following. Each is a property the design must guarantee, not a feature:
+The controller is only safe to run in a shared production cluster if it holds all of the following. Each is a property the design must guarantee, not a feature. These are design requirements that constrain every iteration; their implementation and verification is a dedicated iteration of its own (see Status):
 
 1. **It cannot harm Flux.** Strictly observational, with no capability to affect reconciliation. If the controller fails or is removed, Flux is wholly unaffected.
 2. **It cannot amplify an incident.** It activates during failure, so its own resource use and load on the cluster must stay bounded under a cascading failure and never add pressure to an already-stressed cluster.
